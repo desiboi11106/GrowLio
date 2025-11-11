@@ -1,7 +1,6 @@
 streamlit
-yfinance
-pandas
-numpy
-plotly
 requests
-matplotlib
+beautifulsoup4
+openai
+pandas
+lxml
