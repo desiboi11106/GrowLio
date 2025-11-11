@@ -1,116 +1,87 @@
 import streamlit as st
-import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
+from openai import OpenAI
 
-st.set_page_config(page_title="📈 Stock Signals — GrowLio", layout="wide")
+# ---------- CONFIG ----------
+st.set_page_config(page_title="🤖 Radhe Intern Finder", layout="wide")
+st.title("🎯 Radhe Intern Finder")
 
-# ---------------------------
-# Sidebar inputs
-# ---------------------------
-st.sidebar.header("Stock Settings")
-ticker = st.sidebar.text_input("Ticker", value="AAPL")
-start = st.sidebar.date_input("Start", pd.to_datetime("2022-01-01"))
-end = st.sidebar.date_input("End", pd.to_datetime("today"))
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-st.sidebar.header("Moving Averages")
-short_window = st.sidebar.number_input("Short MA", 5, 100, 20)
-long_window = st.sidebar.number_input("Long MA", 10, 300, 50)
+# ---------- USER PROFILE ----------
+st.sidebar.header("Your Profile")
+profile = {
+    "name": st.sidebar.text_input("Name", "Radhe Bhagat"),
+    "major": st.sidebar.text_input("Major", "Economics and International Affairs"),
+    "school": st.sidebar.text_input("University", "Georgia Tech"),
+    "skills": st.sidebar.text_area("Skills (comma separated)", "Finance, Python, Data Analysis, Excel"),
+    "interests": st.sidebar.text_area("Interests (comma separated)", "Investment Banking, Data Analytics, Consulting"),
+    "location": st.sidebar.text_input("Preferred Location", "Atlanta, Remote")
+}
 
-st.sidebar.header("RSI Settings")
-rsi_period = st.sidebar.number_input("RSI Period", 5, 50, 14)
+keywords = [k.strip() for k in profile["interests"].split(",") if k.strip()]
 
-# ---------------------------
-# Data Fetching Function
-# ---------------------------
+# ---------- SCRAPER ----------
 @st.cache_data
-def load_data(ticker, start, end):
+def scrape_lever_jobs(keywords):
+    jobs = []
+    for kw in keywords:
+        url = f"https://jobs.lever.co/api/postings/?search={kw}&mode=json"
+        try:
+            res = requests.get(url, timeout=10)
+            data = res.json()
+            for d in data:
+                jobs.append({
+                    "company": d.get("hostedUrl", "").split(".")[0].replace("https://jobs.", ""),
+                    "title": d.get("text", ""),
+                    "url": d.get("hostedUrl", ""),
+                    "location": d.get("categories", {}).get("location", ""),
+                    "description": d.get("descriptionPlain", "")[:400]
+                })
+        except Exception as e:
+            print(f"Error scraping {kw}: {e}")
+    return pd.DataFrame(jobs)
+
+# ---------- GPT SUMMARIZER ----------
+def summarize_job(job, profile):
+    prompt = f"""
+    You are an AI career assistant helping a student at {profile['school']} majoring in {profile['major']}.
+    Based on their interests ({profile['interests']}) and skills ({profile['skills']}), 
+    summarize and rate how well this internship fits them (1-10).
+
+    Job Title: {job['title']}
+    Company: {job['company']}
+    Description: {job['description']}
+    Location: {job['location']}
+    """
     try:
-        data = yf.download(ticker, start=start, end=end, progress=False)
-        if data.empty:
-            stock = yf.Ticker(ticker)
-            data = stock.history(start=start, end=end)
-        if data.empty:
-            return None
-        return data
-    except Exception:
-        return None
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": "You are a career assistant."},
+                      {"role": "user", "content": prompt}],
+            temperature=0.6
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error generating summary: {e}"
 
-data = load_data(ticker, start, end)
+# ---------- MAIN ----------
+st.write("Fetching latest internships...")
 
-if data is None:
-    st.error("❌ No data found. Please check ticker or date range.")
-    st.stop()
+jobs_df = scrape_lever_jobs(keywords)
 
-# ---------------------------
-# Technical Indicators
-# ---------------------------
-# Moving Averages
-data["SMA_Short"] = data["Close"].rolling(window=short_window).mean()
-data["SMA_Long"] = data["Close"].rolling(window=long_window).mean()
+if jobs_df.empty:
+    st.warning("No jobs found. Try different keywords or locations.")
+else:
+    for _, job in jobs_df.head(10).iterrows():
+        with st.expander(f"💼 {job['title']} — {job['company']} ({job['location']})"):
+            st.write(job['description'])
+            summary = summarize_job(job, profile)
+            st.markdown(f"**AI Summary:** {summary}")
+            st.markdown(f"[Apply Here]({job['url']})")
 
-# RSI
-delta = data["Close"].diff()
-gain = np.where(delta > 0, delta, 0)
-loss = np.where(delta < 0, -delta, 0)
-avg_gain = pd.Series(gain).rolling(rsi_period).mean()
-avg_loss = pd.Series(loss).rolling(rsi_period).mean()
-rs = avg_gain / avg_loss
-data["RSI"] = 100 - (100 / (1 + rs))
+st.success("Done ✅ — Scroll through the internships above!")
 
-# Signals
-data["Signal"] = np.where(data["SMA_Short"] > data["SMA_Long"], 1, 0)
-data["Position"] = data["Signal"].diff()
-
-# ---------------------------
-# Layout
-# ---------------------------
-st.title("📈 Stock Signals — GrowLio")
-
-tab1, tab2, tab3 = st.tabs(["📊 Chart", "📑 Indicators", "💡 Strategy"])
-
-with tab1:
-    st.subheader(f"Price & Moving Averages for {ticker}")
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(data.index, data["Close"], label="Close Price", alpha=0.7)
-    ax.plot(data.index, data["SMA_Short"], label=f"SMA {short_window}", alpha=0.7)
-    ax.plot(data.index, data["SMA_Long"], label=f"SMA {long_window}", alpha=0.7)
-
-    # Buy/Sell markers
-    ax.plot(data[data["Position"] == 1].index,
-            data["SMA_Short"][data["Position"] == 1],
-            "^", markersize=10, color="g", label="Buy Signal")
-    ax.plot(data[data["Position"] == -1].index,
-            data["SMA_Short"][data["Position"] == -1],
-            "v", markersize=10, color="r", label="Sell Signal")
-
-    ax.set_title(f"{ticker} Price Chart")
-    ax.legend()
-    st.pyplot(fig)
-
-with tab2:
-    st.subheader("RSI Indicator")
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(data.index, data["RSI"], label="RSI", color="purple")
-    ax.axhline(70, linestyle="--", alpha=0.5, color="red")
-    ax.axhline(30, linestyle="--", alpha=0.5, color="green")
-    ax.set_title("Relative Strength Index (RSI)")
-    ax.legend()
-    st.pyplot(fig)
-
-    st.subheader("Raw Data Preview")
-    st.dataframe(data.tail(20))
-
-with tab3:
-    st.subheader("💡 Strategy Insights")
-    st.write("""
-    GrowLio combines **three core investing ideas** into one app:
-    
-    1. **Trend Following** — Using short-term vs long-term moving averages for buy/sell signals.  
-    2. **Momentum** — Applying RSI to gauge overbought (70+) and oversold (30-) conditions.  
-    3. **Historical Analysis** — Looking at stock price movements across user-selected date ranges.  
-
-    ✅ Next steps could include adding **user login, database tracking of trades, portfolio optimization, and news sentiment analysis**.
-    """)
 
