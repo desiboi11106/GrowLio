@@ -1,87 +1,102 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
-import pandas as pd
 from openai import OpenAI
 
-# ---------- CONFIG ----------
-st.set_page_config(page_title="🤖 Radhe Intern Finder", layout="wide")
+# -----------------------------
+# CONFIGURATION
+# -----------------------------
+st.set_page_config(page_title="🎯 Radhe Intern Finder", layout="wide")
+
 st.title("🎯 Radhe Intern Finder")
+st.caption("Find and summarize internships that fit your interests — powered by SerpAPI & GPT.")
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# Load secrets safely
+serpapi_key = st.secrets["serpapi"]["key"]
+openai_key = st.secrets.get("openai", {}).get("key")
 
-# ---------- USER PROFILE ----------
-st.sidebar.header("Your Profile")
-profile = {
-    "name": st.sidebar.text_input("Name", "Radhe Bhagat"),
-    "major": st.sidebar.text_input("Major", "Economics and International Affairs"),
-    "school": st.sidebar.text_input("University", "Georgia Tech"),
-    "skills": st.sidebar.text_area("Skills (comma separated)", "Finance, Python, Data Analysis, Excel"),
-    "interests": st.sidebar.text_area("Interests (comma separated)", "Investment Banking, Data Analytics, Consulting"),
-    "location": st.sidebar.text_input("Preferred Location", "Atlanta, Remote")
-}
+client = None
+if openai_key:
+    client = OpenAI(api_key=openai_key)
 
-keywords = [k.strip() for k in profile["interests"].split(",") if k.strip()]
+# -----------------------------
+# UI
+# -----------------------------
+with st.sidebar:
+    st.header("🔍 Search Settings")
+    query = st.text_input("Keywords", "finance intern, investment, analyst")
+    location = st.text_input("Location", "Atlanta, GA")
+    num_results = st.slider("Number of results", 5, 30, 10)
+    st.markdown("---")
+    st.write("💡 Tip: Try `data science`, `quant`, `consulting`, `policy`, etc.")
 
-# ---------- SCRAPER ----------
-@st.cache_data
-def scrape_lever_jobs(keywords):
-    jobs = []
-    for kw in keywords:
-        url = f"https://jobs.lever.co/api/postings/?search={kw}&mode=json"
-        try:
-            res = requests.get(url, timeout=10)
-            data = res.json()
-            for d in data:
-                jobs.append({
-                    "company": d.get("hostedUrl", "").split(".")[0].replace("https://jobs.", ""),
-                    "title": d.get("text", ""),
-                    "url": d.get("hostedUrl", ""),
-                    "location": d.get("categories", {}).get("location", ""),
-                    "description": d.get("descriptionPlain", "")[:400]
-                })
-        except Exception as e:
-            print(f"Error scraping {kw}: {e}")
-    return pd.DataFrame(jobs)
+# -----------------------------
+# FUNCTION: Fetch internships via SerpAPI
+# -----------------------------
+def fetch_internships(query, location, num_results=10):
+    url = "https://serpapi.com/search.json"
+    params = {
+        "engine": "google_jobs",
+        "q": query,
+        "location": location,
+        "hl": "en",
+        "api_key": serpapi_key
+    }
+    res = requests.get(url, params=params)
+    if res.status_code != 200:
+        st.error(f"SerpAPI Error {res.status_code}: {res.text}")
+        return []
 
-# ---------- GPT SUMMARIZER ----------
-def summarize_job(job, profile):
-    prompt = f"""
-    You are an AI career assistant helping a student at {profile['school']} majoring in {profile['major']}.
-    Based on their interests ({profile['interests']}) and skills ({profile['skills']}), 
-    summarize and rate how well this internship fits them (1-10).
+    data = res.json()
+    jobs = data.get("jobs_results", [])
+    return jobs[:num_results]
 
-    Job Title: {job['title']}
-    Company: {job['company']}
-    Description: {job['description']}
-    Location: {job['location']}
-    """
+# -----------------------------
+# FUNCTION: Summarize job with GPT
+# -----------------------------
+def summarize_job(description):
+    if not client:
+        return "No AI summary (OpenAI key not set)."
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "You are a career assistant."},
-                      {"role": "user", "content": prompt}],
-            temperature=0.6
+            messages=[
+                {"role": "system", "content": "You're a helpful career advisor summarizing job listings for students."},
+                {"role": "user", "content": f"Summarize this internship in 3 lines, focusing on what the intern will do and learn:\n\n{description}"}
+            ],
+            temperature=0.7
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"Error generating summary: {e}"
+        return f"Error: {e}"
 
-# ---------- MAIN ----------
+# -----------------------------
+# MAIN APP
+# -----------------------------
 st.write("Fetching latest internships...")
 
-jobs_df = scrape_lever_jobs(keywords)
+if st.button("🚀 Search Internships"):
+    jobs = fetch_internships(query, location, num_results)
+    if not jobs:
+        st.warning("No jobs found. Try different keywords or locations.")
+    else:
+        st.success(f"✅ Found {len(jobs)} internships — scroll down!")
+        for job in jobs:
+            title = job.get("title", "Untitled Role")
+            company = job.get("company_name", "Unknown Company")
+            link = job.get("apply_link") or job.get("share_link", "#")
+            desc = job.get("description", "No description provided.")
+            location = job.get("location", "")
+            st.markdown(f"### [{title}]({link})")
+            st.write(f"🏢 **{company}** — 📍 {location}")
+            with st.expander("Job Description"):
+                st.write(desc)
+            summary = summarize_job(desc)
+            st.info(summary)
+            st.markdown("---")
 
-if jobs_df.empty:
-    st.warning("No jobs found. Try different keywords or locations.")
 else:
-    for _, job in jobs_df.head(10).iterrows():
-        with st.expander(f"💼 {job['title']} — {job['company']} ({job['location']})"):
-            st.write(job['description'])
-            summary = summarize_job(job, profile)
-            st.markdown(f"**AI Summary:** {summary}")
-            st.markdown(f"[Apply Here]({job['url']})")
+    st.info("👈 Enter your filters on the left and click **Search Internships**!")
 
-st.success("Done ✅ — Scroll through the internships above!")
+
 
 
